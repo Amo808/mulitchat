@@ -272,21 +272,20 @@ class GeminiAdapter(BaseAdapter):
                         )
                     return
 
-                # Handle streaming response - Gemini returns text fragments in JSON format
+                # Handle streaming response - Gemini returns fragmented JSON objects
                 # We need to buffer and parse complete JSON objects
                 text_buffer = ""
                 json_buffer = ""
                 bracket_count = 0
                 in_json = False
+                stream_finished = False
                 
                 async for chunk in response.content.iter_chunked(1024):
                     text_buffer += chunk.decode('utf-8', errors='ignore')
                     
                     # Process character by character to find complete JSON objects
-                    i = 0
-                    while i < len(text_buffer):
-                        char = text_buffer[i]
-                        
+                    processed_chars = 0
+                    for i, char in enumerate(text_buffer):
                         if char == '{' and not in_json:
                             # Start of a new JSON object
                             in_json = True
@@ -356,7 +355,8 @@ class GeminiAdapter(BaseAdapter):
                                                         "model": model
                                                     }
                                                 )
-                                                return
+                                                stream_finished = True
+                                                break  # Exit the character loop
                                         
                                     except json.JSONDecodeError as e:
                                         self.logger.warning(f"Failed to parse JSON object: {json_buffer[:100]}... - {e}")
@@ -367,16 +367,16 @@ class GeminiAdapter(BaseAdapter):
                                     in_json = False
                                     json_buffer = ""
                                     bracket_count = 0
-                        
-                        i += 1
+                                    processed_chars = i + 1
+                        else:
+                            processed_chars = i + 1
                     
-                    # Keep only the unprocessed part of the buffer
-                    if in_json:
-                        # We're in the middle of a JSON object, keep everything
-                        text_buffer = ""
-                    else:
-                        # Remove processed characters, keep last incomplete part
-                        text_buffer = text_buffer[i:]
+                    # If stream finished, exit
+                    if stream_finished:
+                        break
+                    
+                    # Remove processed characters from buffer
+                    text_buffer = text_buffer[processed_chars:]
 
         except Exception as e:
             self.logger.error(f"Error in Gemini API call: {e}")
@@ -386,19 +386,20 @@ class GeminiAdapter(BaseAdapter):
             )
             return
 
-        # If we reach here, send a final response to ensure completion
-        final_output_tokens = self.estimate_tokens(accumulated_content) if accumulated_content else output_tokens
-        yield ChatResponse(
-            content="",
-            done=True,
-            meta={
-                "tokens_in": input_tokens,
-                "tokens_out": final_output_tokens,
-                "total_tokens": input_tokens + final_output_tokens,
-                "provider": ModelProvider.GEMINI,
-                "model": model
-            }
-        )
+        # If we reach here without getting finishReason, send a final response
+        if not stream_finished:
+            final_output_tokens = self.estimate_tokens(accumulated_content) if accumulated_content else output_tokens
+            yield ChatResponse(
+                content="",
+                done=True,
+                meta={
+                    "tokens_in": input_tokens,
+                    "tokens_out": final_output_tokens,
+                    "total_tokens": input_tokens + final_output_tokens,
+                    "provider": ModelProvider.GEMINI,
+                    "model": model
+                }
+            )
 
     def _process_gemini_candidate(self, candidate, accumulated_content, input_tokens, model):
         """Process a single Gemini candidate and return the content"""
