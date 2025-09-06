@@ -268,7 +268,8 @@ class ChatGPTProAdapter(OpenAIAdapter):
 
         # EARLY DEBUGGING: Log entry point
         total_input_length = sum(len(msg.content) for msg in messages)
-        self.logger.info(f"🔍 [ENTRY] GPT-5 Pro generate called - model={model}, input_length={total_input_length} chars")
+        self.logger.info(f"🔍 [ENTRY] ChatGPT Pro generate called - model={model}, input_length={total_input_length} chars")
+        self.logger.info(f"🔍 [ENTRY] Model check - is o3-deep-research: {model == 'o3-deep-research'}, is o1-pro: {model == 'o1-pro'}, is gpt-5: {model == 'gpt-5'}")
         
         # Track if deep research is being used
         is_deep_research = model == "o3-deep-research"
@@ -612,11 +613,13 @@ class ChatGPTProAdapter(OpenAIAdapter):
         else:
             # Special handling for o1 Pro Mode and o3 Deep Search models
             if model in ["o1-pro", "o3-deep-research"]:
-                self.logger.info(f"🔍 Using /v1/responses endpoint for {model}")
+                self.logger.info(f"🔍 DETECTED {model} - Using /v1/responses endpoint")
                 
                 # Prepare payload for responses endpoint
                 payload = self._prepare_api_payload(messages, model, params)
                 url = self._get_api_endpoint(model)
+                self.logger.info(f"🔍 {model} - URL: {url}")
+                self.logger.info(f"🔍 {model} - Payload keys: {list(payload.keys())}")
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
@@ -754,6 +757,7 @@ class ChatGPTProAdapter(OpenAIAdapter):
                     )
             else:
                 # Use parent implementation for standard models (o1, o1-mini, gpt-4o, etc.)
+                self.logger.info(f"🔍 Using parent implementation for model: {model}")
                 async for response in super().generate(messages, model, params, **kwargs):
                     # Add Pro metadata
                     if response.meta:
