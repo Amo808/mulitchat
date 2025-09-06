@@ -153,7 +153,7 @@ class ChatGPTProAdapter(OpenAIAdapter):
         """Determine the correct API endpoint based on the model"""
         # o1 Pro Mode and o3 Deep Search require the /v1/responses endpoint
         if model in ["o1-pro", "o3-deep-research"]:
-            return f"{self.base_url}/responses"
+            return f"{self.base_url}/v1/responses"
         else:
             # All other models use the standard chat/completions endpoint
             return f"{self.base_url}/chat/completions"
@@ -175,12 +175,26 @@ class ChatGPTProAdapter(OpenAIAdapter):
         # Base payload - model-specific structure
         if model in ["o1-pro", "o3-deep-research"]:
             # These models use the /v1/responses endpoint with different payload structure
+            # Convert messages to input text format for Responses API
+            input_text = ""
+            for msg in api_messages:
+                role_prefix = f"{msg['role'].upper()}: " if msg['role'] != 'user' else ""
+                input_text += f"{role_prefix}{msg['content']}\n\n"
+            
             payload = {
                 "model": model,
-                "messages": api_messages,
+                "input": input_text.strip(),
                 "stream": params.stream,
-                "max_completion_tokens": params.max_tokens if params.max_tokens else 32768
             }
+            
+            # Add max_completion_tokens if specified
+            if params.max_tokens:
+                payload["max_completion_tokens"] = params.max_tokens
+            
+            # For o3-deep-research, we need to add tools for web search capability
+            if model == "o3-deep-research":
+                payload["tools"] = [{"type": "web_search_preview"}]
+            
             # o1-pro and o3-deep-research don't support temperature, top_p, etc.
             self.logger.info(f"🔍 {model} payload (responses endpoint): {json.dumps(payload, indent=2)}")
         else:
@@ -634,7 +648,30 @@ class ChatGPTProAdapter(OpenAIAdapter):
                                         break
                                     try:
                                         data = json.loads(line[6:])
-                                        if 'choices' in data and data['choices']:
+                                        
+                                        # Handle Responses API format
+                                        if 'output' in data:
+                                            # This is the output field format for Responses API
+                                            for output_item in data.get('output', []):
+                                                if output_item.get('type') == 'message':
+                                                    content_items = output_item.get('content', [])
+                                                    for content_item in content_items:
+                                                        if content_item.get('type') == 'output_text':
+                                                            text = content_item.get('text', '')
+                                                            if text:
+                                                                yield ChatResponse(
+                                                                    content=text,
+                                                                    done=False,
+                                                                    meta={
+                                                                        "provider": ModelProvider.CHATGPT_PRO,
+                                                                        "model": model,
+                                                                        "chatgpt_pro": True,
+                                                                        "pro_mode": True if model == "o1-pro" else False,
+                                                                        "deep_research": True if model == "o3-deep-research" else False
+                                                                    }
+                                                                )
+                                        elif 'choices' in data:
+                                            # Fallback to standard chat completions format if available
                                             delta = data['choices'][0].get('delta', {})
                                             content = delta.get('content', '')
                                             if content:
@@ -649,6 +686,7 @@ class ChatGPTProAdapter(OpenAIAdapter):
                                                         "deep_research": True if model == "o3-deep-research" else False
                                                     }
                                                 )
+                                        
                                     except json.JSONDecodeError as e:
                                         self.logger.warning(f"🔍 [{model}] JSON decode error: {e}")
                                         continue
@@ -668,8 +706,25 @@ class ChatGPTProAdapter(OpenAIAdapter):
                         else:
                             # Non-streaming response for responses endpoint
                             response_data = await response.json()
-                            if 'choices' in response_data and response_data['choices']:
+                            
+                            # Handle Responses API format
+                            content = ""
+                            if 'output_text' in response_data:
+                                # Direct output_text field
+                                content = response_data['output_text']
+                            elif 'output' in response_data:
+                                # Parse output array
+                                for output_item in response_data.get('output', []):
+                                    if output_item.get('type') == 'message':
+                                        content_items = output_item.get('content', [])
+                                        for content_item in content_items:
+                                            if content_item.get('type') == 'output_text':
+                                                content += content_item.get('text', '')
+                            elif 'choices' in response_data:
+                                # Fallback to chat completions format
                                 content = response_data['choices'][0]['message']['content']
+                            
+                            if content:
                                 yield ChatResponse(
                                     content=content,
                                     done=True,
