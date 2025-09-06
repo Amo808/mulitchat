@@ -610,93 +610,125 @@ class ChatGPTProAdapter(OpenAIAdapter):
                 # Ensure monitoring task is cancelled
                 if 'monitor_task' in locals() and not monitor_task.done():
                     monitor_task.cancel()
-        else:
-            # Special handling for o1 Pro Mode and o3 Deep Search models
-            if model in ["o1-pro", "o3-deep-research"]:
-                self.logger.info(f"🔍 DETECTED {model} - Using /v1/responses endpoint")
-                
-                # Prepare payload for responses endpoint
-                payload = self._prepare_api_payload(messages, model, params)
-                url = self._get_api_endpoint(model)
-                self.logger.info(f"🔍 {model} - URL: {url}")
-                self.logger.info(f"🔍 {model} - Payload keys: {list(payload.keys())}")
-                headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                }
-                
-                try:
-                    await self._ensure_session()
-                    async with self.session.post(url, json=payload, headers=headers) as response:
-                        self.logger.info(f"🔍 {model}: Received response status: {response.status}")
-                        if response.status != 200:
-                            error_text = await response.text()
-                            self.logger.error(f"{model} API Error {response.status}: {error_text}")
-                            yield ChatResponse(
-                                content=f"API Error {response.status}: {error_text}",
-                                done=True,
-                                error=True,
-                                meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
-                            )
-                            return
+        # Special handling for o1 Pro Mode and o3 Deep Search models
+        elif model in ["o1-pro", "o3-deep-research"]:
+            self.logger.info(f"🔍 DETECTED {model} - Using /v1/responses endpoint")
+            
+            # Prepare payload for responses endpoint
+            payload = self._prepare_api_payload(messages, model, params)
+            url = self._get_api_endpoint(model)
+            self.logger.info(f"🔍 {model} - URL: {url}")
+            self.logger.info(f"🔍 {model} - Payload keys: {list(payload.keys())}")
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            try:
+                await self._ensure_session()
+                async with self.session.post(url, json=payload, headers=headers) as response:
+                    self.logger.info(f"🔍 {model}: Received response status: {response.status}")
+                    if response.status != 200:
+                        error_text = await response.text()
+                        self.logger.error(f"{model} API Error {response.status}: {error_text}")
+                        yield ChatResponse(
+                            content=f"API Error {response.status}: {error_text}",
+                            done=True,
+                            error=True,
+                            meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
+                        )
+                        return
+                    
+                    if payload.get("stream", False):
+                        self.logger.info(f"🔍 [{model}] Starting streaming response processing...")
+                        async for line in response.content:
+                            line = line.decode('utf-8').strip()
+                            self.logger.debug(f"🔍 [{model}] Received line: {line[:100]}...")
+                            if line.startswith('data: '):
+                                if line == 'data: [DONE]':
+                                    self.logger.info(f"🔍 [{model}] Streaming completed [DONE]")
+                                    break
+                                try:
+                                    data = json.loads(line[6:])
+                                    
+                                    # Handle Responses API format
+                                    if 'output' in data:
+                                        # This is the output field format for Responses API
+                                        for output_item in data.get('output', []):
+                                            if output_item.get('type') == 'message':
+                                                content_items = output_item.get('content', [])
+                                                for content_item in content_items:
+                                                    if content_item.get('type') == 'output_text':
+                                                        text = content_item.get('text', '')
+                                                        if text:
+                                                            yield ChatResponse(
+                                                                content=text,
+                                                                done=False,
+                                                                meta={
+                                                                    "provider": ModelProvider.CHATGPT_PRO,
+                                                                    "model": model,
+                                                                    "chatgpt_pro": True,
+                                                                    "pro_mode": True if model == "o1-pro" else False,
+                                                                    "deep_research": True if model == "o3-deep-research" else False
+                                                                }
+                                                            )
+                                    elif 'choices' in data:
+                                        # Fallback to standard chat completions format if available
+                                        delta = data['choices'][0].get('delta', {})
+                                        content = delta.get('content', '')
+                                        if content:
+                                            yield ChatResponse(
+                                                content=content,
+                                                done=False,
+                                                meta={
+                                                    "provider": ModelProvider.CHATGPT_PRO,
+                                                    "model": model,
+                                                    "chatgpt_pro": True,
+                                                    "pro_mode": True if model == "o1-pro" else False,
+                                                    "deep_research": True if model == "o3-deep-research" else False
+                                                }
+                                            )
+                                    
+                                except json.JSONDecodeError as e:
+                                    self.logger.warning(f"🔍 [{model}] JSON decode error: {e}")
+                                    continue
                         
-                        if payload.get("stream", False):
-                            self.logger.info(f"🔍 [{model}] Starting streaming response processing...")
-                            async for line in response.content:
-                                line = line.decode('utf-8').strip()
-                                self.logger.debug(f"🔍 [{model}] Received line: {line[:100]}...")
-                                if line.startswith('data: '):
-                                    if line == 'data: [DONE]':
-                                        self.logger.info(f"🔍 [{model}] Streaming completed [DONE]")
-                                        break
-                                    try:
-                                        data = json.loads(line[6:])
-                                        
-                                        # Handle Responses API format
-                                        if 'output' in data:
-                                            # This is the output field format for Responses API
-                                            for output_item in data.get('output', []):
-                                                if output_item.get('type') == 'message':
-                                                    content_items = output_item.get('content', [])
-                                                    for content_item in content_items:
-                                                        if content_item.get('type') == 'output_text':
-                                                            text = content_item.get('text', '')
-                                                            if text:
-                                                                yield ChatResponse(
-                                                                    content=text,
-                                                                    done=False,
-                                                                    meta={
-                                                                        "provider": ModelProvider.CHATGPT_PRO,
-                                                                        "model": model,
-                                                                        "chatgpt_pro": True,
-                                                                        "pro_mode": True if model == "o1-pro" else False,
-                                                                        "deep_research": True if model == "o3-deep-research" else False
-                                                                    }
-                                                                )
-                                        elif 'choices' in data:
-                                            # Fallback to standard chat completions format if available
-                                            delta = data['choices'][0].get('delta', {})
-                                            content = delta.get('content', '')
-                                            if content:
-                                                yield ChatResponse(
-                                                    content=content,
-                                                    done=False,
-                                                    meta={
-                                                        "provider": ModelProvider.CHATGPT_PRO,
-                                                        "model": model,
-                                                        "chatgpt_pro": True,
-                                                        "pro_mode": True if model == "o1-pro" else False,
-                                                        "deep_research": True if model == "o3-deep-research" else False
-                                                    }
-                                                )
-                                        
-                                    except json.JSONDecodeError as e:
-                                        self.logger.warning(f"🔍 [{model}] JSON decode error: {e}")
-                                        continue
-                            
-                            # Send final completion signal
+                        # Send final completion signal
+                        yield ChatResponse(
+                            content="",
+                            done=True,
+                            meta={
+                                "provider": ModelProvider.CHATGPT_PRO,
+                                "model": model,
+                                "chatgpt_pro": True,
+                                "pro_mode": True if model == "o1-pro" else False,
+                                "deep_research": True if model == "o3-deep-research" else False
+                            }
+                        )
+                    else:
+                        # Non-streaming response for responses endpoint
+                        response_data = await response.json()
+                        
+                        # Handle Responses API format
+                        content = ""
+                        if 'output_text' in response_data:
+                            # Direct output_text field
+                            content = response_data['output_text']
+                        elif 'output' in response_data:
+                            # Parse output array
+                            for output_item in response_data.get('output', []):
+                                if output_item.get('type') == 'message':
+                                    content_items = output_item.get('content', [])
+                                    for content_item in content_items:
+                                        if content_item.get('type') == 'output_text':
+                                            content += content_item.get('text', '')
+                        elif 'choices' in response_data:
+                            # Fallback to chat completions format
+                            content = response_data['choices'][0]['message']['content']
+                        
+                        if content:
                             yield ChatResponse(
-                                content="",
+                                content=content,
                                 done=True,
                                 meta={
                                     "provider": ModelProvider.CHATGPT_PRO,
@@ -707,72 +739,39 @@ class ChatGPTProAdapter(OpenAIAdapter):
                                 }
                             )
                         else:
-                            # Non-streaming response for responses endpoint
-                            response_data = await response.json()
-                            
-                            # Handle Responses API format
-                            content = ""
-                            if 'output_text' in response_data:
-                                # Direct output_text field
-                                content = response_data['output_text']
-                            elif 'output' in response_data:
-                                # Parse output array
-                                for output_item in response_data.get('output', []):
-                                    if output_item.get('type') == 'message':
-                                        content_items = output_item.get('content', [])
-                                        for content_item in content_items:
-                                            if content_item.get('type') == 'output_text':
-                                                content += content_item.get('text', '')
-                            elif 'choices' in response_data:
-                                # Fallback to chat completions format
-                                content = response_data['choices'][0]['message']['content']
-                            
-                            if content:
-                                yield ChatResponse(
-                                    content=content,
-                                    done=True,
-                                    meta={
-                                        "provider": ModelProvider.CHATGPT_PRO,
-                                        "model": model,
-                                        "chatgpt_pro": True,
-                                        "pro_mode": True if model == "o1-pro" else False,
-                                        "deep_research": True if model == "o3-deep-research" else False
-                                    }
-                                )
-                            else:
-                                self.logger.error(f"{model} API: No content in response: {response_data}")
-                                yield ChatResponse(
-                                    content=f"No response received from {model}",
-                                    done=True,
-                                    error=True,
-                                    meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
-                                )
-                except Exception as e:
-                    self.logger.error(f"{model} generation error: {e}")
-                    yield ChatResponse(
-                        content=f"Error: {str(e)}",
-                        done=True,
-                        error=True,
-                        meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
-                    )
-            else:
-                # Use parent implementation for standard models (o1, o1-mini, gpt-4o, etc.)
-                self.logger.info(f"🔍 Using parent implementation for model: {model}")
-                async for response in super().generate(messages, model, params, **kwargs):
-                    # Add Pro metadata
-                    if response.meta:
-                        response.meta["chatgpt_pro"] = True
-                        response.meta["unlimited_access"] = True
-                        # Add deep research flag if it was used
-                        if is_deep_research:
-                            response.meta["deep_research"] = True
-                            self.logger.info(f"DEBUG: Added deep_research=True to response.meta")
-                        # Add GPT-5 Pro metadata
-                        if model == "gpt-5":
-                            response.meta["gpt5_pro"] = True
-                            response.meta["reasoning_effort"] = "high"
-                    
-                    yield response
+                            self.logger.error(f"{model} API: No content in response: {response_data}")
+                            yield ChatResponse(
+                                content=f"No response received from {model}",
+                                done=True,
+                                error=True,
+                                meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
+                            )
+            except Exception as e:
+                self.logger.error(f"{model} generation error: {e}")
+                yield ChatResponse(
+                    content=f"Error: {str(e)}",
+                    done=True,
+                    error=True,
+                    meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
+                )
+        else:
+            # Use parent implementation for standard models (o1, o1-mini, gpt-4o, etc.)
+            self.logger.info(f"🔍 Using parent implementation for model: {model}")
+            async for response in super().generate(messages, model, params, **kwargs):
+                # Add Pro metadata
+                if response.meta:
+                    response.meta["chatgpt_pro"] = True
+                    response.meta["unlimited_access"] = True
+                    # Add deep research flag if it was used
+                    if is_deep_research:
+                        response.meta["deep_research"] = True
+                        self.logger.info(f"DEBUG: Added deep_research=True to response.meta")
+                    # Add GPT-5 Pro metadata
+                    if model == "gpt-5":
+                        response.meta["gpt5_pro"] = True
+                        response.meta["reasoning_effort"] = "high"
+                
+                yield response
 
     async def deep_research(
         self,
