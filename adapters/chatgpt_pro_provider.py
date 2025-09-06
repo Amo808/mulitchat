@@ -153,7 +153,7 @@ class ChatGPTProAdapter(OpenAIAdapter):
         """Determine the correct API endpoint based on the model"""
         # o1 Pro Mode and o3 Deep Search require the /v1/responses endpoint
         if model in ["o1-pro", "o3-deep-research"]:
-            return f"{self.base_url}/v1/responses"
+            return f"{self.base_url}/responses"
         else:
             # All other models use the standard chat/completions endpoint
             return f"{self.base_url}/chat/completions"
