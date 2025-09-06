@@ -149,6 +149,15 @@ class ChatGPTProAdapter(OpenAIAdapter):
                 
         return api_messages
 
+    def _get_api_endpoint(self, model: str) -> str:
+        """Determine the correct API endpoint based on the model"""
+        # o1 Pro Mode and o3 Deep Search require the /v1/responses endpoint
+        if model in ["o1-pro", "o3-deep-research"]:
+            return f"{self.base_url}/responses"
+        else:
+            # All other models use the standard chat/completions endpoint
+            return f"{self.base_url}/chat/completions"
+
     def _prepare_api_payload(self, messages: List[Message], model: str, params: GenerationParams) -> dict:
         """Prepare API payload with model-specific parameter filtering"""
         # Convert messages to API format with smart handling for long content
@@ -163,60 +172,72 @@ class ChatGPTProAdapter(OpenAIAdapter):
                     "content": msg.content
                 })
 
-        # Base payload
-        payload = {
-            "model": model,
-            "messages": api_messages,
-            "stream": params.stream,
-        }
-
-        # Debug: Log input parameters
-        self.logger.info(f"🔍 Input params for {model}: max_tokens={params.max_tokens}, temperature={params.temperature}, top_p={params.top_p}, stream={params.stream}")
-
-        # Add parameters based on model capabilities
-        if model == "gpt-5":
-            # GPT-5 specific parameters - more restrictive and optimized for long texts
-            # FORCE STREAMING for GPT-5 to avoid hanging
-            payload["stream"] = True
-            
-            # Limit max_tokens for very long inputs to avoid timeouts
-            max_tokens = params.max_tokens if params.max_tokens else 16384
-            if max_tokens > 32768:  # Cap for stability
-                max_tokens = 32768
-            payload["max_completion_tokens"] = max_tokens
-            
-            # Use more conservative temperature for long texts
-            temperature = params.temperature if params.temperature is not None else 0.7
-            if temperature > 1.0:
-                temperature = 1.0
-            payload["temperature"] = temperature
-            
-            # GPT-5 Pro reasoning parameters - adjusted for long content
-            payload["reasoning_effort"] = "medium"  # Use medium instead of high for long texts
-            payload["verbosity"] = 2  # Lower verbosity to reduce processing time
-            
-            # GPT-5 doesn't support these parameters:
-            # - top_p (causes error)
-            # - frequency_penalty 
-            # - presence_penalty
-            self.logger.info(f"🔍 GPT-5 payload (filtered, FORCED STREAMING): {json.dumps(payload, indent=2)}")
-            
+        # Base payload - model-specific structure
+        if model in ["o1-pro", "o3-deep-research"]:
+            # These models use the /v1/responses endpoint with different payload structure
+            payload = {
+                "model": model,
+                "messages": api_messages,
+                "stream": params.stream,
+                "max_completion_tokens": params.max_tokens if params.max_tokens else 32768
+            }
+            # o1-pro and o3-deep-research don't support temperature, top_p, etc.
+            self.logger.info(f"🔍 {model} payload (responses endpoint): {json.dumps(payload, indent=2)}")
         else:
-            # Other models (o1, o3, legacy models) - use standard parameters
-            if params.max_tokens:
-                if any(model.startswith(prefix) for prefix in ['o1', 'o3', 'o4']):
-                    payload["max_completion_tokens"] = params.max_tokens
-                else:
-                    payload["max_tokens"] = params.max_tokens
-            
-            if params.temperature is not None:
-                payload["temperature"] = params.temperature
-            if params.top_p is not None:
-                payload["top_p"] = params.top_p
-            if params.frequency_penalty is not None:
-                payload["frequency_penalty"] = params.frequency_penalty
-            if params.presence_penalty is not None:
-                payload["presence_penalty"] = params.presence_penalty
+            # Standard chat/completions payload
+            payload = {
+                "model": model,
+                "messages": api_messages,
+                "stream": params.stream,
+            }
+
+            # Debug: Log input parameters
+            self.logger.info(f"🔍 Input params for {model}: max_tokens={params.max_tokens}, temperature={params.temperature}, top_p={params.top_p}, stream={params.stream}")
+
+            # Add parameters based on model capabilities
+            if model == "gpt-5":
+                # GPT-5 specific parameters - more restrictive and optimized for long texts
+                # FORCE STREAMING for GPT-5 to avoid hanging
+                payload["stream"] = True
+                
+                # Limit max_tokens for very long inputs to avoid timeouts
+                max_tokens = params.max_tokens if params.max_tokens else 16384
+                if max_tokens > 32768:  # Cap for stability
+                    max_tokens = 32768
+                payload["max_completion_tokens"] = max_tokens
+                
+                # Use more conservative temperature for long texts
+                temperature = params.temperature if params.temperature is not None else 0.7
+                if temperature > 1.0:
+                    temperature = 1.0
+                payload["temperature"] = temperature
+                
+                # GPT-5 Pro reasoning parameters - adjusted for long content
+                payload["reasoning_effort"] = "medium"  # Use medium instead of high for long texts
+                payload["verbosity"] = 2  # Lower verbosity to reduce processing time
+                
+                # GPT-5 doesn't support these parameters:
+                # - top_p (causes error)
+                # - frequency_penalty 
+                # - presence_penalty
+                self.logger.info(f"🔍 GPT-5 payload (filtered, FORCED STREAMING): {json.dumps(payload, indent=2)}")
+                
+            else:
+                # Other models (o1, o3, legacy models) - use standard parameters
+                if params.max_tokens:
+                    if any(model.startswith(prefix) for prefix in ['o1', 'o3', 'o4']):
+                        payload["max_completion_tokens"] = params.max_tokens
+                    else:
+                        payload["max_tokens"] = params.max_tokens
+                
+                if params.temperature is not None:
+                    payload["temperature"] = params.temperature
+                if params.top_p is not None:
+                    payload["top_p"] = params.top_p
+                if params.frequency_penalty is not None:
+                    payload["frequency_penalty"] = params.frequency_penalty
+                if params.presence_penalty is not None:
+                    payload["presence_penalty"] = params.presence_penalty
 
         return payload
 
@@ -331,7 +352,7 @@ class ChatGPTProAdapter(OpenAIAdapter):
             self.logger.info(f"🔍 GPT-5 Pro API Payload: {json.dumps(payload, indent=2)}")
             
             # Custom GPT-5 API call with extended timeout for long texts
-            url = f"{self.base_url}/chat/completions"
+            url = self._get_api_endpoint(model)
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
@@ -575,22 +596,124 @@ class ChatGPTProAdapter(OpenAIAdapter):
                 if 'monitor_task' in locals() and not monitor_task.done():
                     monitor_task.cancel()
         else:
-            # Use parent implementation for other models
-            async for response in super().generate(messages, model, params, **kwargs):
-                # Add Pro metadata
-                if response.meta:
-                    response.meta["chatgpt_pro"] = True
-                    response.meta["unlimited_access"] = True
-                    # Add deep research flag if it was used
-                    if is_deep_research:
-                        response.meta["deep_research"] = True
-                        self.logger.info(f"DEBUG: Added deep_research=True to response.meta")
-                    # Add GPT-5 Pro metadata
-                    if model == "gpt-5":
-                        response.meta["gpt5_pro"] = True
-                        response.meta["reasoning_effort"] = "high"
+            # Special handling for o1 Pro Mode and o3 Deep Search models
+            if model in ["o1-pro", "o3-deep-research"]:
+                self.logger.info(f"🔍 Using /v1/responses endpoint for {model}")
                 
-                yield response
+                # Prepare payload for responses endpoint
+                payload = self._prepare_api_payload(messages, model, params)
+                url = self._get_api_endpoint(model)
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+                
+                try:
+                    await self._ensure_session()
+                    async with self.session.post(url, json=payload, headers=headers) as response:
+                        self.logger.info(f"🔍 {model}: Received response status: {response.status}")
+                        if response.status != 200:
+                            error_text = await response.text()
+                            self.logger.error(f"{model} API Error {response.status}: {error_text}")
+                            yield ChatResponse(
+                                content=f"API Error {response.status}: {error_text}",
+                                done=True,
+                                error=True,
+                                meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
+                            )
+                            return
+                        
+                        if payload.get("stream", False):
+                            self.logger.info(f"🔍 [{model}] Starting streaming response processing...")
+                            async for line in response.content:
+                                line = line.decode('utf-8').strip()
+                                self.logger.debug(f"🔍 [{model}] Received line: {line[:100]}...")
+                                if line.startswith('data: '):
+                                    if line == 'data: [DONE]':
+                                        self.logger.info(f"🔍 [{model}] Streaming completed [DONE]")
+                                        break
+                                    try:
+                                        data = json.loads(line[6:])
+                                        if 'choices' in data and data['choices']:
+                                            delta = data['choices'][0].get('delta', {})
+                                            content = delta.get('content', '')
+                                            if content:
+                                                yield ChatResponse(
+                                                    content=content,
+                                                    done=False,
+                                                    meta={
+                                                        "provider": ModelProvider.CHATGPT_PRO,
+                                                        "model": model,
+                                                        "chatgpt_pro": True,
+                                                        "pro_mode": True if model == "o1-pro" else False,
+                                                        "deep_research": True if model == "o3-deep-research" else False
+                                                    }
+                                                )
+                                    except json.JSONDecodeError as e:
+                                        self.logger.warning(f"🔍 [{model}] JSON decode error: {e}")
+                                        continue
+                            
+                            # Send final completion signal
+                            yield ChatResponse(
+                                content="",
+                                done=True,
+                                meta={
+                                    "provider": ModelProvider.CHATGPT_PRO,
+                                    "model": model,
+                                    "chatgpt_pro": True,
+                                    "pro_mode": True if model == "o1-pro" else False,
+                                    "deep_research": True if model == "o3-deep-research" else False
+                                }
+                            )
+                        else:
+                            # Non-streaming response for responses endpoint
+                            response_data = await response.json()
+                            if 'choices' in response_data and response_data['choices']:
+                                content = response_data['choices'][0]['message']['content']
+                                yield ChatResponse(
+                                    content=content,
+                                    done=True,
+                                    meta={
+                                        "provider": ModelProvider.CHATGPT_PRO,
+                                        "model": model,
+                                        "chatgpt_pro": True,
+                                        "pro_mode": True if model == "o1-pro" else False,
+                                        "deep_research": True if model == "o3-deep-research" else False
+                                    }
+                                )
+                            else:
+                                self.logger.error(f"{model} API: No content in response: {response_data}")
+                                yield ChatResponse(
+                                    content=f"No response received from {model}",
+                                    done=True,
+                                    error=True,
+                                    meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
+                                )
+                except Exception as e:
+                    self.logger.error(f"{model} generation error: {e}")
+                    yield ChatResponse(
+                        content=f"Error: {str(e)}",
+                        done=True,
+                        error=True,
+                        meta={"provider": ModelProvider.CHATGPT_PRO, "model": model}
+                    )
+            else:
+                # Use parent implementation for standard models (o1, o1-mini, gpt-4o, etc.)
+                async for response in super().generate(messages, model, params, **kwargs):
+                    # Add Pro metadata
+                    if response.meta:
+                        response.meta["chatgpt_pro"] = True
+                        response.meta["unlimited_access"] = True
+                        # Add deep research flag if it was used
+                        if is_deep_research:
+                            response.meta["deep_research"] = True
+                            self.logger.info(f"DEBUG: Added deep_research=True to response.meta")
+                        # Add GPT-5 Pro metadata
+                        if model == "gpt-5":
+                            response.meta["gpt5_pro"] = True
+                            response.meta["reasoning_effort"] = "high"
+                    
+                    yield response
 
     async def deep_research(
         self,
@@ -651,7 +774,7 @@ class ChatGPTProAdapter(OpenAIAdapter):
                 "max_completion_tokens": 10  # Use correct parameter for o1
             }
             
-            url = f"{self.base_url}/chat/completions"
+            url = self._get_api_endpoint("o1")  # Use standard endpoint for o1 validation
             async with self.session.post(url, json=test_payload) as response:
                 if response.status == 403:
                     return False, "ChatGPT Pro subscription required for this provider"
