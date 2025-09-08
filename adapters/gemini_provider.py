@@ -5,6 +5,13 @@ from typing import Dict, List, Optional, AsyncGenerator, Any
 import aiohttp
 from .base_provider import BaseAdapter, Message, GenerationParams, ChatResponse, ModelInfo, ModelProvider, ModelType, ProviderConfig
 
+# Try to import tiktoken for accurate token counting
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,6 +24,19 @@ class GeminiAdapter(BaseAdapter):
         self.base_url = config.base_url or "https://generativelanguage.googleapis.com"
         self.base_url = self.base_url.rstrip("/")
         self.session = None
+        
+        # Initialize tokenizer for accurate token counting
+        self.tokenizer = None
+        if TIKTOKEN_AVAILABLE:
+            try:
+                # Use cl100k_base encoding (GPT-4 tokenizer) as approximation for Gemini
+                self.tokenizer = tiktoken.get_encoding("cl100k_base")
+                self.logger.info("Tiktoken tokenizer initialized for accurate token counting")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize tiktoken: {e}")
+                self.tokenizer = None
+        else:
+            self.logger.warning("Tiktoken not available, using character-based token estimation")
         
         # Debug: Check if API key is available
         if self.api_key:
@@ -44,6 +64,15 @@ class GeminiAdapter(BaseAdapter):
                 type=ModelType.CHAT,
                 max_output_tokens=8192,
                 recommended_max_tokens=4096,
+                pricing={
+                    "input_tokens_small": 1.25,   # <= 200k tokens
+                    "input_tokens_large": 2.50,   # > 200k tokens
+                    "output_tokens_small": 10.00, # <= 200k tokens (including thinking)
+                    "output_tokens_large": 15.00, # > 200k tokens (including thinking)
+                    "context_caching_small": 0.31, # <= 200k tokens
+                    "context_caching_large": 0.625, # > 200k tokens
+                    "context_storage": 4.50       # per 1M tokens per hour
+                },
                 description="Most powerful thinking model with advanced reasoning and multimodal understanding"
             ),
             # Gemini 2.5 Flash - лучшее соотношение цена/качество
@@ -59,6 +88,18 @@ class GeminiAdapter(BaseAdapter):
                 type=ModelType.CHAT,
                 max_output_tokens=8192,
                 recommended_max_tokens=4096,
+                pricing={
+                    "input_tokens": 0.30,    # text/image/video, audio is 1.00
+                    "output_tokens": 2.50,   # including thinking tokens
+                    "context_caching": 0.075, # text/image/video, audio is 0.25
+                    "context_storage": 1.00,  # per 1M tokens per hour
+                    "audio_input": 1.00,     # audio input special pricing
+                    "audio_caching": 0.25,   # audio caching special pricing
+                    "live_api_input_text": 0.50,
+                    "live_api_input_audio": 3.00,
+                    "live_api_output_text": 2.00,
+                    "live_api_output_audio": 12.00
+                },
                 description="Best price-performance with adaptive thinking and comprehensive capabilities"
             ),
             # Gemini 2.5 Flash Lite - самая экономичная
@@ -74,6 +115,14 @@ class GeminiAdapter(BaseAdapter):
                 type=ModelType.CHAT,
                 max_output_tokens=8192,
                 recommended_max_tokens=4096,
+                pricing={
+                    "input_tokens": 0.10,    # text/image/video
+                    "input_tokens_audio": 0.30, # audio input
+                    "output_tokens": 0.40,   # including thinking tokens
+                    "context_caching": 0.025, # text/image/video
+                    "context_caching_audio": 0.125, # audio caching
+                    "context_storage": 1.00  # per 1M tokens per hour
+                },
                 description="Most cost-effective model with high throughput and low latency"
             ),
             # Gemini 2.0 Flash - новое поколение
@@ -89,6 +138,19 @@ class GeminiAdapter(BaseAdapter):
                 type=ModelType.CHAT,
                 max_output_tokens=8192,
                 recommended_max_tokens=4096,
+                pricing={
+                    "input_tokens": 0.10,    # text/image/video
+                    "input_tokens_audio": 0.70, # audio input
+                    "output_tokens": 0.40,   # all outputs
+                    "context_caching": 0.025, # text/image/video per 1M tokens
+                    "context_caching_audio": 0.175, # audio caching per 1M tokens
+                    "context_storage": 1.00, # per 1M tokens per hour
+                    "image_generation": 0.039, # per image (1290 tokens)
+                    "live_api_input_text": 0.35,
+                    "live_api_input_audio": 2.10,
+                    "live_api_output_text": 1.50,
+                    "live_api_output_audio": 8.50
+                },
                 description="Next-generation features with speed and real-time streaming"
             ),
             # Gemini 1.5 Pro - устаревшая но мощная
@@ -104,6 +166,16 @@ class GeminiAdapter(BaseAdapter):
                 type=ModelType.CHAT,
                 max_output_tokens=8192,
                 recommended_max_tokens=4096,
+                pricing={
+                    "input_tokens_small": 1.25,  # <= 128k tokens
+                    "input_tokens_large": 2.50,  # > 128k tokens
+                    "output_tokens_small": 5.00, # <= 128k tokens
+                    "output_tokens_large": 10.00, # > 128k tokens
+                    "context_caching_small": 0.3125, # <= 128k tokens
+                    "context_caching_large": 0.625,  # > 128k tokens
+                    "context_storage": 4.50,     # per 1M tokens per hour
+                    "grounding_search": 35.0     # per 1k grounding requests
+                },
                 description="Complex reasoning tasks requiring greater intelligence (legacy)"
             ),
             # Gemini 1.5 Flash - устаревшая но быстрая
@@ -119,6 +191,16 @@ class GeminiAdapter(BaseAdapter):
                 type=ModelType.CHAT,
                 max_output_tokens=8192,
                 recommended_max_tokens=4096,
+                pricing={
+                    "input_tokens_small": 0.075,  # <= 128k tokens
+                    "input_tokens_large": 0.15,   # > 128k tokens
+                    "output_tokens_small": 0.30,  # <= 128k tokens
+                    "output_tokens_large": 0.60,  # > 128k tokens
+                    "context_caching_small": 0.01875, # <= 128k tokens
+                    "context_caching_large": 0.0375,  # > 128k tokens
+                    "context_storage": 1.00,      # per 1M tokens per hour
+                    "grounding_search": 35.0      # per 1k grounding requests
+                },
                 description="Fast and versatile performance across diverse tasks (legacy)"
             )
         ]
@@ -255,12 +337,19 @@ class GeminiAdapter(BaseAdapter):
                         content = candidates[0]["content"]["parts"][0]["text"]
                         usage_metadata = data.get("usageMetadata", {})
                         
+                        # Get accurate token counts from API or estimate
+                        actual_input_tokens = usage_metadata.get("promptTokenCount", input_tokens)
+                        actual_output_tokens = usage_metadata.get("candidatesTokenCount", self.estimate_tokens(content))
+                        estimated_cost = self._calculate_cost(actual_input_tokens, actual_output_tokens, model, actual_input_tokens)
+                        
                         yield ChatResponse(
                             content=content,
                             done=True,
                             meta={
-                                "tokens_in": usage_metadata.get("promptTokenCount", input_tokens),
-                                "tokens_out": usage_metadata.get("candidatesTokenCount", self.estimate_tokens(content)),
+                                "tokens_in": actual_input_tokens,
+                                "tokens_out": actual_output_tokens,
+                                "total_tokens": actual_input_tokens + actual_output_tokens,
+                                "estimated_cost": estimated_cost,
                                 "provider": ModelProvider.GEMINI,
                                 "model": model
                             }
@@ -345,6 +434,7 @@ class GeminiAdapter(BaseAdapter):
                                                 
                                                 # Send final completion signal
                                                 final_output_tokens = self.estimate_tokens(accumulated_content)
+                                                estimated_cost = self._calculate_cost(input_tokens, final_output_tokens, model, input_tokens)
                                                 yield ChatResponse(
                                                     content="",
                                                     done=True,
@@ -352,6 +442,7 @@ class GeminiAdapter(BaseAdapter):
                                                         "tokens_in": input_tokens,
                                                         "tokens_out": final_output_tokens,
                                                         "total_tokens": input_tokens + final_output_tokens,
+                                                        "estimated_cost": estimated_cost,
                                                         "provider": ModelProvider.GEMINI,
                                                         "model": model
                                                     }
@@ -388,6 +479,7 @@ class GeminiAdapter(BaseAdapter):
 
         # If we reach here, send a final response to ensure completion
         final_output_tokens = self.estimate_tokens(accumulated_content) if accumulated_content else output_tokens
+        estimated_cost = self._calculate_cost(input_tokens, final_output_tokens, model, input_tokens)
         yield ChatResponse(
             content="",
             done=True,
@@ -395,6 +487,7 @@ class GeminiAdapter(BaseAdapter):
                 "tokens_in": input_tokens,
                 "tokens_out": final_output_tokens,
                 "total_tokens": input_tokens + final_output_tokens,
+                "estimated_cost": estimated_cost,
                 "provider": ModelProvider.GEMINI,
                 "model": model
             }
@@ -415,11 +508,121 @@ class GeminiAdapter(BaseAdapter):
         return self.supported_models
 
     def estimate_tokens(self, text: str) -> int:
-        """Estimate token count (rough approximation for Gemini)"""
-        # Gemini uses different tokenization, rough estimate: 1 token ≈ 4 characters
-        return len(text) // 4
+        """Estimate token count using tiktoken (more accurate) or character-based approximation"""
+        if not text:
+            return 0
+            
+        if self.tokenizer:
+            try:
+                return len(self.tokenizer.encode(text))
+            except Exception as e:
+                self.logger.warning(f"Tiktoken encoding failed: {e}, falling back to character estimation")
+        
+        # Fallback: Gemini uses different tokenization, rough estimate: 1 token ≈ 3.5 characters
+        # This is more accurate than the previous 4 characters per token
+        return max(1, len(text) // 4)
+
+    async def estimate_tokens_accurate(self, text: str, model: str) -> int:
+        """Get accurate token count using Gemini API if possible, fallback to estimation"""
+        # Try to get accurate count from API first
+        api_count = await self.count_tokens_api(text, model)
+        if api_count is not None:
+            return api_count
+        
+        # Fallback to local estimation
+        return self.estimate_tokens(text)
+
+    def _calculate_cost(self, input_tokens: int, output_tokens: int, model: str, 
+                       prompt_size: int = 0) -> float:
+        """Calculate estimated cost based on Gemini model pricing"""
+        
+        # Get model info for pricing
+        model_info = None
+        for m in self.supported_models:
+            if m.id == model or m.name == model:
+                model_info = m
+                break
+        
+        if not model_info or not model_info.pricing:
+            # Default fallback pricing (Gemini 2.5 Flash)
+            input_cost_per_million = 0.30
+            output_cost_per_million = 2.50
+        else:
+            pricing = model_info.pricing
+            
+            # Determine pricing based on model and prompt size
+            if model in ["gemini-2.5-pro"]:
+                # Gemini 2.5 Pro has different pricing for <= 200k vs > 200k tokens
+                if prompt_size <= 200_000:
+                    input_cost_per_million = pricing.get("input_tokens_small", 1.25)
+                    output_cost_per_million = pricing.get("output_tokens_small", 10.00)
+                else:
+                    input_cost_per_million = pricing.get("input_tokens_large", 2.50)
+                    output_cost_per_million = pricing.get("output_tokens_large", 15.00)
+            elif model in ["gemini-1.5-pro", "gemini-1.5-flash"]:
+                # Gemini 1.5 models have different pricing for <= 128k vs > 128k tokens
+                if prompt_size <= 128_000:
+                    input_cost_per_million = pricing.get("input_tokens_small", 0.075)
+                    output_cost_per_million = pricing.get("output_tokens_small", 0.30)
+                else:
+                    input_cost_per_million = pricing.get("input_tokens_large", 0.15)
+                    output_cost_per_million = pricing.get("output_tokens_large", 0.60)
+            else:
+                # Simple pricing models (2.5 Flash, 2.5 Flash Lite, 2.0 Flash)
+                input_cost_per_million = pricing.get("input_tokens", 0.30)
+                output_cost_per_million = pricing.get("output_tokens", 2.50)
+        
+        # Calculate costs
+        input_cost = (input_tokens / 1_000_000) * input_cost_per_million
+        output_cost = (output_tokens / 1_000_000) * output_cost_per_million
+        
+        total_cost = input_cost + output_cost
+        return round(total_cost, 6)
 
     async def close(self):
         """Clean up session"""
         if self.session and not self.session.closed:
             await self.session.close()
+
+    async def count_tokens_api(self, text: str, model: str) -> Optional[int]:
+        """
+        Get accurate token count from Gemini API
+        Gemini API provides a countTokens endpoint for precise token counting
+        """
+        if not self.api_key or not text:
+            return None
+            
+        try:
+            await self._ensure_session()
+            
+            url = f"{self.base_url}/v1beta/models/{model}:countTokens?key={self.api_key}"
+            payload = {
+                "contents": [{
+                    "parts": [{"text": text}]
+                }]
+            }
+            
+            async with self.session.post(url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("totalTokens", None)
+                else:
+                    self.logger.warning(f"Token counting API failed: {response.status}")
+                    return None
+                    
+        except Exception as e:
+            self.logger.warning(f"Failed to get accurate token count from API: {e}")
+            return None
+
+    async def get_model_pricing_info(self, model: str) -> Dict[str, Any]:
+        """Get pricing information for a specific model"""
+        for model_info in self.supported_models:
+            if model_info.id == model or model_info.name == model:
+                return {
+                    "model": model,
+                    "pricing": model_info.pricing,
+                    "context_length": model_info.context_length,
+                    "max_output_tokens": model_info.max_output_tokens,
+                    "provider": "Gemini"
+                }
+        return {"model": model, "pricing": None, "provider": "Gemini"}
