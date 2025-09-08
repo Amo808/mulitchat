@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Dict, List, Optional, AsyncGenerator, Any
 import aiohttp
+import tiktoken
 from .base_provider import BaseAdapter, Message, GenerationParams, ChatResponse, ModelInfo, ModelProvider, ModelType, ProviderConfig
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,39 @@ class GeminiAdapter(BaseAdapter):
             self.logger.info(f"Gemini API key loaded successfully (length: {len(self.api_key)})")
         else:
             self.logger.error("Gemini API key not found in environment variables!")
+
+    # Актуальные цены на Gemini модели (январь 2025) - за 1M токенов
+    MODEL_PRICING = {
+        # Gemini 2.5 Pro - самая мощная модель
+        "gemini-2.5-pro": {
+            "input_tokens": 1.25,   # $1.25 per 1M input tokens
+            "output_tokens": 10.00, # $10.00 per 1M output tokens
+        },
+        # Gemini 2.5 Flash - оптимальная модель
+        "gemini-2.5-flash": {
+            "input_tokens": 0.075,  # $0.075 per 1M input tokens  
+            "output_tokens": 0.30,  # $0.30 per 1M output tokens
+        },
+        # Gemini 2.5 Flash Lite - самая дешевая
+        "gemini-2.5-flash-lite": {
+            "input_tokens": 0.0375, # $0.0375 per 1M input tokens
+            "output_tokens": 0.15,  # $0.15 per 1M output tokens
+        },
+        # Gemini 2.0 Flash - новое поколение
+        "gemini-2.0-flash": {
+            "input_tokens": 0.075,  # $0.075 per 1M input tokens
+            "output_tokens": 0.30,  # $0.30 per 1M output tokens
+        },
+        # Legacy модели
+        "gemini-1.5-pro": {
+            "input_tokens": 1.25,   # $1.25 per 1M input tokens
+            "output_tokens": 5.00,  # $5.00 per 1M output tokens
+        },
+        "gemini-1.5-flash": {
+            "input_tokens": 0.075,  # $0.075 per 1M input tokens
+            "output_tokens": 0.30,  # $0.30 per 1M output tokens
+        }
+    }
 
     @property
     def name(self) -> str:
@@ -195,9 +229,9 @@ class GeminiAdapter(BaseAdapter):
             )
             return
 
-        # Calculate input tokens (rough estimation)
+        # Точный подсчет входящих токенов
         input_text = "\n".join([f"{msg.get('role', 'user')}: {msg.get('parts', [{}])[0].get('text', '')}" for msg in contents])
-        input_tokens = self.estimate_tokens(input_text)
+        input_tokens = self.estimate_tokens_accurate(input_text)
 
         # Gemini API payload
         payload = {
@@ -315,12 +349,16 @@ class GeminiAdapter(BaseAdapter):
                                                 accumulated_content += content
                                                 
                                                 # Yield the streaming chunk immediately
+                                                current_output_tokens = self.estimate_tokens_accurate(accumulated_content)
+                                                current_cost = self._calculate_cost(model, input_tokens, current_output_tokens)
+                                                
                                                 yield ChatResponse(
                                                     content=content,
                                                     done=False,
                                                     meta={
                                                         "tokens_in": input_tokens,
-                                                        "tokens_out": self.estimate_tokens(accumulated_content),
+                                                        "tokens_out": current_output_tokens,
+                                                        "estimated_cost": current_cost,
                                                         "provider": ModelProvider.GEMINI,
                                                         "model": model
                                                     }
@@ -332,19 +370,25 @@ class GeminiAdapter(BaseAdapter):
                                                 self.logger.info(f"Gemini response finished with reason: {finish_reason}")
                                                 if finish_reason == "MAX_TOKENS":
                                                     self.logger.warning(f"Response was truncated due to max_tokens limit.")
+                                                    truncated_output_tokens = self.estimate_tokens_accurate(accumulated_content)
+                                                    truncated_cost = self._calculate_cost(model, input_tokens, truncated_output_tokens)
+                                                    
                                                     yield ChatResponse(
                                                         content="\n\n⚠️ *Response was truncated due to token limit. You can increase max_tokens in settings for longer responses.*",
                                                         done=False,
                                                         meta={
                                                             "tokens_in": input_tokens,
-                                                            "tokens_out": self.estimate_tokens(accumulated_content),
+                                                            "tokens_out": truncated_output_tokens,
+                                                            "estimated_cost": truncated_cost,
                                                             "provider": ModelProvider.GEMINI,
                                                             "model": model
                                                         }
                                                     )
                                                 
                                                 # Send final completion signal
-                                                final_output_tokens = self.estimate_tokens(accumulated_content)
+                                                final_output_tokens = self.estimate_tokens_accurate(accumulated_content)
+                                                final_cost = self._calculate_cost(model, input_tokens, final_output_tokens)
+                                                
                                                 yield ChatResponse(
                                                     content="",
                                                     done=True,
@@ -352,6 +396,7 @@ class GeminiAdapter(BaseAdapter):
                                                         "tokens_in": input_tokens,
                                                         "tokens_out": final_output_tokens,
                                                         "total_tokens": input_tokens + final_output_tokens,
+                                                        "estimated_cost": final_cost,
                                                         "provider": ModelProvider.GEMINI,
                                                         "model": model
                                                     }
@@ -387,7 +432,9 @@ class GeminiAdapter(BaseAdapter):
             return
 
         # If we reach here, send a final response to ensure completion
-        final_output_tokens = self.estimate_tokens(accumulated_content) if accumulated_content else output_tokens
+        final_output_tokens = self.estimate_tokens_accurate(accumulated_content) if accumulated_content else output_tokens
+        estimated_cost = self._calculate_cost(model, input_tokens, final_output_tokens)
+        
         yield ChatResponse(
             content="",
             done=True,
@@ -395,6 +442,7 @@ class GeminiAdapter(BaseAdapter):
                 "tokens_in": input_tokens,
                 "tokens_out": final_output_tokens,
                 "total_tokens": input_tokens + final_output_tokens,
+                "estimated_cost": estimated_cost,
                 "provider": ModelProvider.GEMINI,
                 "model": model
             }
@@ -418,6 +466,8 @@ class GeminiAdapter(BaseAdapter):
         """Estimate token count (rough approximation for Gemini)"""
         # Gemini uses different tokenization, rough estimate: 1 token ≈ 4 characters
         return len(text) // 4
+
+
 
     async def close(self):
         """Clean up session"""
